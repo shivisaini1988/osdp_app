@@ -31,6 +31,7 @@ from TKH_OSDP.commands.osdp_RSTAT import osdp_RSTATCommand
 from TKH_OSDP.commands.osdp_CAP import osdp_CAPCommand
 from TKH_OSDP.commands.osdp_POLL import osdp_POLLCommand
 from TKH_OSDP.commands.osdp_MFG import osdp_MFGCommand, MFG_COMMANDS
+from TKH_OSDP.commands.osdp_KEYSET import osdp_KeysetCommand
 from result import Ok, Err
 
 
@@ -89,7 +90,7 @@ class SetAddressDialog(QDialog):
 
 class DeviceDiscoveryWorker(QObject):
     """Worker thread for device discovery"""
-    device_found = Signal(int, int, str)  # address, serial_number, status
+    device_found = Signal(int, str, str)  # address, serial_number, status
     discovery_finished = Signal()
     error_occurred = Signal(str)
     
@@ -108,7 +109,7 @@ class DeviceDiscoveryWorker(QObject):
             for device in self.control_panel.devices[original_device_count:]:
                 self.device_found.emit(
                     device.pd_address, 
-                    device.serial_number, 
+                    str(device.serial_number), 
                     "Discovered"
                 )
             
@@ -342,12 +343,22 @@ class OSDPMainWindow(QMainWindow):
         self.key_edit = QLineEdit("303132333435363738393A3B3C3D3E3F")
         security_layout.addRow("SCBK Key:", self.key_edit)
         
+        # New key input for reset key functionality
+        self.new_key_edit = QLineEdit()
+        self.new_key_edit.setPlaceholderText("Enter new key (32 hex chars) or leave empty to use current key")
+        security_layout.addRow("New Key:", self.new_key_edit)
+        
         secure_button_layout = QHBoxLayout()
         
         self.secure_btn = QPushButton("Setup Secure Channel")
         self.secure_btn.clicked.connect(self.setup_secure_channel)
         self.secure_btn.setEnabled(False)
         secure_button_layout.addWidget(self.secure_btn)
+        
+        self.reset_key_btn = QPushButton("Reset Key & Setup Secure Channel")
+        self.reset_key_btn.clicked.connect(self.reset_key_and_setup_secure)
+        self.reset_key_btn.setEnabled(False)
+        secure_button_layout.addWidget(self.reset_key_btn)
         
         self.reset_secure_btn = QPushButton("Reset to Unencrypted")
         self.reset_secure_btn.clicked.connect(self.reset_secure_channel)
@@ -467,9 +478,11 @@ class OSDPMainWindow(QMainWindow):
         led_layout = QGridLayout(led_group)
         
         led_layout.addWidget(QLabel("Reader:"), 0, 0)
-        self.led_reader_spin = QSpinBox()
-        self.led_reader_spin.setRange(0, 255)
-        led_layout.addWidget(self.led_reader_spin, 0, 1)
+        self.led_reader_combo = QComboBox()
+        self.led_reader_combo.addItem("0x80 (128)", 0x80)
+        self.led_reader_combo.addItem("0x00 (0)", 0x00)
+        self.led_reader_combo.addItem("0x01 (1)", 0x01)
+        led_layout.addWidget(self.led_reader_combo, 0, 1)
         
         led_layout.addWidget(QLabel("LED Number:"), 0, 2)
         self.led_number_spin = QSpinBox()
@@ -524,7 +537,9 @@ class OSDPMainWindow(QMainWindow):
         
         buzzer_layout.addWidget(QLabel("Reader:"), 0, 0)
         self.buzzer_reader_spin = QSpinBox()
-        self.buzzer_reader_spin.setRange(0, 255)
+        self.buzzer_reader_spin.setRange(128, 128)  # Only allow 128 (0x80)
+        self.buzzer_reader_spin.setValue(0x80)  # Set to 0x80 (128)
+        self.buzzer_reader_spin.setEnabled(False)  # Disable editing since only one value allowed
         buzzer_layout.addWidget(self.buzzer_reader_spin, 0, 1)
         
         buzzer_layout.addWidget(QLabel("Tone Code:"), 0, 2)
@@ -744,6 +759,7 @@ class OSDPMainWindow(QMainWindow):
             self.disconnect_btn.setEnabled(False)
             self.discover_btn.setEnabled(False)
             self.secure_btn.setEnabled(False)
+            self.reset_key_btn.setEnabled(False)
             self.reset_secure_btn.setEnabled(False)
             
             self.log_message("Disconnected from transport")
@@ -772,8 +788,8 @@ class OSDPMainWindow(QMainWindow):
         
         self.log_message("Starting device discovery...")
     
-    def on_device_discovered(self, address: int, serial_number: int, status: str):
-        item = QTreeWidgetItem([str(address), str(serial_number), status])
+    def on_device_discovered(self, address: int, serial_number: str, status: str):
+        item = QTreeWidgetItem([str(address), serial_number, status])
         self.device_tree.addTopLevelItem(item)
         self.log_message(f"Device discovered - Address: {address}, Serial: {serial_number}")
     
@@ -802,6 +818,7 @@ class OSDPMainWindow(QMainWindow):
             if device.pd_address == address:
                 self.current_device = device
                 self.secure_btn.setEnabled(True)
+                self.reset_key_btn.setEnabled(True)
                 self.reset_secure_btn.setEnabled(True)
                 
                 # Show current secure channel status
@@ -932,7 +949,7 @@ class OSDPMainWindow(QMainWindow):
         
         try:
             cmd = osdp_LEDCommand(
-                reader_number=self.led_reader_spin.value(),
+                reader_number=self.led_reader_combo.currentData(),
                 LED_number=self.led_number_spin.value(),
                 control_code=self.led_control_spin.value(),
                 ON_time=self.led_on_time_spin.value(),
@@ -950,7 +967,7 @@ class OSDPMainWindow(QMainWindow):
                     color_names = ["Black", "Red", "Green", "Amber", "Blue", "Magenta", "Cyan", "White"]
                     on_color_name = color_names[self.led_on_color_combo.currentIndex()]
                     off_color_name = color_names[self.led_off_color_combo.currentIndex()]
-                    self.log_message(f"LED command sent successfully - Reader: {self.led_reader_spin.value()}, LED: {self.led_number_spin.value()}, Control: {self.led_control_spin.value()}, ON: {self.led_on_time_spin.value()}x100ms ({on_color_name}), OFF: {self.led_off_time_spin.value()}x100ms ({off_color_name}), Timer: {self.led_timer_spin.value()}x100ms")
+                    self.log_message(f"LED command sent successfully - Reader: {self.led_reader_combo.currentData()}, LED: {self.led_number_spin.value()}, Control: {self.led_control_spin.value()}, ON: {self.led_on_time_spin.value()}x100ms ({on_color_name}), OFF: {self.led_off_time_spin.value()}x100ms ({off_color_name}), Timer: {self.led_timer_spin.value()}x100ms")
                 case Err(error):
                     self.log_message(f"LED command failed: {error}")
                     
@@ -1189,6 +1206,105 @@ Serial Number: {response.serial_number}"""
                     
         except Exception as e:
             QMessageBox.critical(self, "MFG Command Error", f"Failed to send MFG command: {str(e)}")
+    
+    def reset_key_and_setup_secure(self):
+        """Reset key using KEYSET command and setup secure channel with new key"""
+        if not self.current_device:
+            QMessageBox.warning(self, "Warning", "No device selected")
+            return
+        
+        try:
+            # Get the new key from input field
+            new_key = self.new_key_edit.text().strip()
+            
+            # Validate new key if provided
+            if new_key:
+                # Remove any spaces or separators
+                new_key = new_key.replace(" ", "").replace(":", "").replace("-", "")
+                
+                # Validate hex format and length
+                if len(new_key) != 32:
+                    QMessageBox.warning(self, "Invalid Key", "Key must be exactly 32 hexadecimal characters (16 bytes)")
+                    return
+                
+                try:
+                    # Test if it's valid hex
+                    bytes.fromhex(new_key)
+                except ValueError:
+                    QMessageBox.warning(self, "Invalid Key", "Key must contain only hexadecimal characters (0-9, A-F)")
+                    return
+                
+                key_to_use = new_key
+                self.log_message(f"Using new key: {new_key.upper()}")
+            else:
+                # Use current key from main field
+                key_to_use = self.key_edit.text()
+                self.log_message("Using current key from SCBK Key field")
+            
+            # Stop monitoring if it's running to reset the channel cleanly
+            was_monitoring = self.monitor_thread and self.monitor_thread.isRunning()
+            if was_monitoring:
+                self.stop_monitoring()
+                self.log_message("Stopped monitoring to reset key and establish secure channel")
+            
+            # Reset channel first to ensure clean state
+            self.current_device.resetChannel()
+            self.log_message("Reset device channel to clean state")
+            
+            # First establish secure channel with current key to enable KEYSET command
+            current_key = self.key_edit.text()
+            self.current_device.setupSecureChannel(current_key)
+            self.log_message("Established secure channel with current key to enable KEYSET command")
+            
+            # Send KEYSET command to set new key in device (requires active secure channel)
+            keyset_cmd = osdp_KeysetCommand(key_type=1, data=key_to_use)  # key_type=1 for SCBK
+            result = self.current_device.sendReceiveCommand(keyset_cmd)
+            
+            match result:
+                case Ok(response):
+                    self.log_message("KEYSET command sent successfully - new key set in device")
+                    
+                    # Reset channel to clear old secure channel
+                    self.current_device.resetChannel()
+                    self.log_message("Reset channel after KEYSET to clear old secure channel")
+                    
+                    # Update the main key field with the new key if it was provided
+                    if new_key:
+                        self.key_edit.setText(new_key.upper())
+                    
+                    # Setup secure channel with the new key
+                    self.current_device.setupSecureChannel(key_to_use)
+                    self.log_message("Secure channel established successfully with new key")
+                    
+                    # Clear the new key field after successful setup
+                    self.new_key_edit.clear()
+                    
+                    # Restart monitoring if it was running before
+                    if was_monitoring:
+                        self.start_monitoring()
+                        self.log_message("Restarted monitoring with new secure channel")
+                        QMessageBox.information(self, "Success", "Key reset and secure channel established. Monitoring restarted.")
+                    else:
+                        # Offer to start monitoring
+                        reply = QMessageBox.question(
+                            self, 
+                            "Start Monitoring", 
+                            "Key reset and secure channel established. Would you like to start monitoring?",
+                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                        )
+                        
+                        if reply == QMessageBox.StandardButton.Yes:
+                            self.start_monitoring()
+                            QMessageBox.information(self, "Success", "Key reset, secure channel established, and monitoring started")
+                        else:
+                            QMessageBox.information(self, "Success", "Key reset and secure channel established")
+                
+                case Err(error):
+                    self.log_message(f"KEYSET command failed: {error}")
+                    QMessageBox.critical(self, "KEYSET Error", f"Failed to set new key in device: {error}")
+                    
+        except Exception as e:
+            QMessageBox.critical(self, "Reset Key Error", f"Failed to reset key and setup secure channel: {str(e)}")
     
     def reset_secure_channel(self):
         """Reset device to unencrypted mode"""
